@@ -7,7 +7,7 @@ type RankList struct {
 	name     string
 	version  int64
 	capacity int32
-	tree     *rbTree[int64]
+	sl       *skipList
 	scores   map[int64]Score
 }
 
@@ -18,7 +18,7 @@ func NewRankList(name string, capacity int32) *RankList {
 	return &RankList{
 		name:     name,
 		capacity: capacity,
-		tree:     &rbTree[int64]{},
+		sl:       newSkipList(),
 		scores:   make(map[int64]Score),
 	}
 }
@@ -32,7 +32,7 @@ func (rl *RankList) clone() *RankList {
 		name:     rl.name,
 		version:  rl.version,
 		capacity: rl.capacity,
-		tree:     rl.tree.clone(),
+		sl:       rl.sl.clone(),
 		scores:   newScores,
 	}
 }
@@ -55,19 +55,19 @@ func (rl *RankList) Version() int64 {
 func (rl *RankList) IsEmpty() bool {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
-	return rl.tree.size == 0
+	return rl.sl.Len() == 0
 }
 
 func (rl *RankList) IsFull() bool {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
-	return int32(rl.tree.size) >= rl.capacity
+	return int32(rl.sl.Len()) >= rl.capacity
 }
 
 func (rl *RankList) Len() int32 {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
-	return int32(rl.tree.size)
+	return int32(rl.sl.Len())
 }
 
 func (rl *RankList) Put(playerID int64, score Score) (updated, accepted bool) {
@@ -79,21 +79,21 @@ func (rl *RankList) Put(playerID int64, score Score) (updated, accepted bool) {
 		if score.Compare(old) == 0 {
 			return false, true
 		}
-		node := rl.tree.find(old)
-		if node != nil {
-			rl.tree.delete(node)
-		}
+		rl.sl.Delete(old, playerID)
 		delete(rl.scores, playerID)
-	} else if int32(rl.tree.size) >= rl.capacity {
-		worst := rl.tree.maximum(rl.tree.root)
-		if worst != nil && score.Compare(worst.score) >= 0 {
-			return false, false
+	} else if int32(rl.sl.Len()) >= rl.capacity {
+		top := rl.sl.TopN(int(rl.sl.Len()))
+		if len(top) > 0 {
+			worst := top[len(top)-1]
+			if score.Compare(worst.score) >= 0 {
+				return false, false
+			}
+			rl.sl.Delete(worst.score, worst.key)
+			delete(rl.scores, worst.key)
 		}
-		rl.tree.delete(worst)
-		delete(rl.scores, worst.value)
 	}
 
-	rl.tree.insert(&rbNode[int64]{score: score, value: playerID})
+	rl.sl.Insert(score, playerID)
 	rl.scores[playerID] = score
 	rl.version++
 	return true, true
@@ -106,10 +106,7 @@ func (rl *RankList) Remove(playerID int64) bool {
 	if !exists {
 		return false
 	}
-	node := rl.tree.find(score)
-	if node != nil {
-		rl.tree.delete(node)
-	}
+	rl.sl.Delete(score, playerID)
 	delete(rl.scores, playerID)
 	rl.version++
 	return true
@@ -136,29 +133,24 @@ func (rl *RankList) GetRank(playerID int64) (int32, bool) {
 	if !exists {
 		return 0, false
 	}
-	return int32(rl.tree.rank(score)), true
+	return int32(rl.sl.Rank(score)), true
 }
 
 func (rl *RankList) GetTopN(limit int32) []ScoredEntry {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
-	if limit <= 0 || rl.tree.size == 0 {
+	if limit <= 0 || rl.sl.Len() == 0 {
 		return nil
 	}
-	if limit > int32(rl.tree.size) {
-		limit = int32(rl.tree.size)
-	}
-	entries := make([]ScoredEntry, 0, limit)
-	var rank int32
-	rl.tree.inorder(func(n *rbNode[int64]) bool {
-		rank++
-		entries = append(entries, ScoredEntry{
-			PlayerID: n.value,
+	nodes := rl.sl.TopN(int(limit))
+	entries := make([]ScoredEntry, len(nodes))
+	for i, n := range nodes {
+		entries[i] = ScoredEntry{
+			PlayerID: n.key,
 			Score:    n.score,
-			Rank:     rank,
-		})
-		return rank < limit
-	})
+			Rank:     int32(i + 1),
+		}
+	}
 	return entries
 }
 
@@ -172,26 +164,53 @@ func (rl *RankList) getRangeLocked(startRank, endRank int32) []ScoredEntry {
 	if startRank <= 0 {
 		startRank = 1
 	}
-	if endRank > int32(rl.tree.size) {
-		endRank = int32(rl.tree.size)
+	if endRank > int32(rl.sl.Len()) {
+		endRank = int32(rl.sl.Len())
 	}
-	if startRank > endRank || rl.tree.size == 0 {
+	if startRank > endRank || rl.sl.Len() == 0 {
 		return nil
 	}
-	entries := make([]ScoredEntry, 0, endRank-startRank+1)
-	var rank int32
-	rl.tree.inorder(func(n *rbNode[int64]) bool {
-		rank++
-		if rank >= startRank && rank <= endRank {
-			entries = append(entries, ScoredEntry{
-				PlayerID: n.value,
-				Score:    n.score,
-				Rank:     rank,
-			})
+	nodes := rl.sl.Range(int(startRank), int(endRank))
+	entries := make([]ScoredEntry, len(nodes))
+	for i, n := range nodes {
+		entries[i] = ScoredEntry{
+			PlayerID: n.key,
+			Score:    n.score,
+			Rank:     startRank + int32(i),
 		}
-		return rank <= endRank
-	})
+	}
 	return entries
+}
+
+func (rl *RankList) Page(page, pageSize int32) ([]ScoredEntry, int32) {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+	total := int32(rl.sl.Len())
+	totalPages := (total + pageSize - 1) / pageSize
+	if page > totalPages {
+		return nil, totalPages
+	}
+	start := (page-1)*pageSize + 1
+	end := page * pageSize
+	if end > total {
+		end = total
+	}
+	nodes := rl.sl.Range(int(start), int(end))
+	entries := make([]ScoredEntry, len(nodes))
+	for i, n := range nodes {
+		entries[i] = ScoredEntry{
+			PlayerID: n.key,
+			Score:    n.score,
+			Rank:     start + int32(i),
+		}
+	}
+	return entries, totalPages
 }
 
 func (rl *RankList) Around(playerID int64, beforeCount, afterCount int32) []ScoredEntry {
@@ -201,13 +220,13 @@ func (rl *RankList) Around(playerID int64, beforeCount, afterCount int32) []Scor
 	if !exists {
 		return nil
 	}
-	rank := int32(rl.tree.rank(score))
+	rank := int32(rl.sl.Rank(score))
 	startRank := rank - beforeCount
 	if startRank < 1 {
 		startRank = 1
 	}
 	endRank := rank + afterCount
-	total := int32(rl.tree.size)
+	total := int32(rl.sl.Len())
 	if endRank > total {
 		endRank = total
 	}
@@ -217,16 +236,14 @@ func (rl *RankList) Around(playerID int64, beforeCount, afterCount int32) []Scor
 func (rl *RankList) Entries() []ScoredEntry {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
-	entries := make([]ScoredEntry, 0, rl.tree.size)
-	var rank int32
-	rl.tree.inorder(func(n *rbNode[int64]) bool {
-		rank++
-		entries = append(entries, ScoredEntry{
-			PlayerID: n.value,
+	nodes := rl.sl.TopN(rl.sl.Len())
+	entries := make([]ScoredEntry, len(nodes))
+	for i, n := range nodes {
+		entries[i] = ScoredEntry{
+			PlayerID: n.key,
 			Score:    n.score,
-			Rank:     rank,
-		})
-		return true
-	})
+			Rank:     int32(i + 1),
+		}
+	}
 	return entries
 }

@@ -38,6 +38,7 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/api/ranklist/rank", s.auth(s.handleGetRank))
 	mux.HandleFunc("/api/ranklist/top", s.auth(s.handleTopN))
 	mux.HandleFunc("/api/ranklist/range", s.auth(s.handleRange))
+	mux.HandleFunc("/api/ranklist/page", s.auth(s.handlePage))
 	mux.HandleFunc("/api/ranklist/snapshot", s.auth(s.handleSnapshot))
 	mux.HandleFunc("/api/ranklist/version", s.auth(s.handleVersionRead))
 	mux.HandleFunc("/api/ranklist/list", s.auth(s.handleList))
@@ -309,6 +310,47 @@ func (s *Server) handleRange(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version": snap.Version(),
 		"entries": result,
+	})
+}
+
+func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
+	serverID := r.URL.Query().Get("server_id")
+	pageStr := r.URL.Query().Get("page")
+	pageSizeStr := r.URL.Query().Get("page_size")
+	if serverID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "server_id required"})
+		return
+	}
+	page, _ := strconv.ParseInt(pageStr, 10, 32)
+	pageSize, _ := strconv.ParseInt(pageSizeStr, 10, 32)
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+	rl, ok := s.ranker.Get(serverID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "ranklist not found"})
+		return
+	}
+	snap := rl.Snapshot()
+	entries, totalPages := snap.Page(int32(page), int32(pageSize))
+	result := make([]map[string]any, len(entries))
+	for i, e := range entries {
+		result[i] = map[string]any{
+			"rank":       e.Rank,
+			"player_id":  e.PlayerID,
+			"primary":    e.Score.Primary,
+			"secondary":  e.Score.Secondary,
+			"arrival":    e.Score.Arrival,
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"page":        page,
+		"page_size":   pageSize,
+		"total_pages": totalPages,
+		"entries":     result,
 	})
 }
 
