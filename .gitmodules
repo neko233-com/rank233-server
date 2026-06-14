@@ -1,0 +1,3 @@
+[submodule "lib-go"]
+	path = lib-go
+	url = https://github.com/neko233-com/rank233-lib-go.git

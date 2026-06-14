@@ -1,0 +1,12 @@
+[Unit]
+Description=rank233-server game leaderboard
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rank233-server -addr :6320
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

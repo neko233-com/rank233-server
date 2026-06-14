@@ -1,0 +1,6 @@
+services:
+  rank233-server:
+    build: .
+    ports:
+      - "6320:6320"
+    restart: unless-stopped

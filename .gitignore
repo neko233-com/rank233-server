@@ -1,0 +1,9 @@
+/bin/
+/data/
+/run/
+*.exe
+*.db
+*.db-journal
+.DS_Store
+.idea/
+.vscode/
